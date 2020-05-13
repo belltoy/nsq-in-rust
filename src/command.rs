@@ -1,10 +1,8 @@
 use serde_json::Value as JsonValue;
 
-pub const HEARTBEAT_RESPONSE: &str = "_heartbeat_";
-pub const OK_RESPONSE: &str = "OK";
+pub type MessageBody = Vec<u8>;
 
-type MessageBody = Vec<u8>;
-
+#[derive(Debug)]
 pub enum Command {
     Version,
     Identify(JsonValue),
@@ -18,17 +16,17 @@ pub enum Command {
     Touch(String),
     Close,
     Nop,
-    Auth(MessageBody),
+    Auth(String),
 }
 
-pub enum Body<'a> {
-    Binary(&'a MessageBody),
-    Messages(&'a Vec<MessageBody>),
-    Json(&'a JsonValue),
+pub(crate) enum Body {
+    Binary(MessageBody),
+    Messages(Vec<MessageBody>),
+    Json(JsonValue),
 }
 
 impl Command {
-    pub fn header(&self) -> String {
+    pub(crate) fn header(&self) -> String {
         use self::Command::*;
         let cmd_name = self.cmd();
         match *self {
@@ -48,13 +46,14 @@ impl Command {
         }
     }
 
-    pub fn body(&self) -> Option<Body> {
+    pub(crate) fn body(self) -> Option<Body> {
         use self::Command::*;
-        match *self {
-            Identify(ref value) => Body::Json(value).into(),
+        match self {
+            Identify(value) => Body::Json(value).into(),
             Version | Sub(..) | Rdy(..) | Fin(..) | Req(..) | Touch(..) | Close | Nop => None,
-            Pub(_, ref body) | Dpub(_, _, ref body) | Auth(ref body) => Body::Binary(body).into(),
-            Mpub(_, ref messages) => Body::Messages(messages).into(),
+            Pub(_, body) | Dpub(_, _, body) => Body::Binary(body).into(),
+            Mpub(_, messages) => Body::Messages(messages).into(),
+            Auth(secret) => Body::Binary(secret.into_bytes()).into(),
         }
     }
 

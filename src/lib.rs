@@ -1,21 +1,27 @@
-extern crate bytes;
-extern crate byteorder;
-extern crate hostname;
-extern crate serde;
-#[macro_use]
-extern crate serde_json;
-extern crate tokio;
-extern crate tokio_codec;
-extern crate tokio_io;
-extern crate hyper;
-extern crate futures;
+//! It provides high-level Consumer and Producer types as well as low-level functions to communicate over the NSQ protocol.
+//!
+//! ## Consumer
+//!
+//! TODO
+//!
+//! ## Producer
+//!
+//! Producing messages can be done by creating an instance of a Producer.
+//!
+//! ```rust
+//! ```
 
 mod codec;
-mod command;
-pub mod connection;
 mod error;
-mod config;
-// mod producer;
+pub mod config;
+mod producer;
 mod consumer;
 
+pub mod command;
+pub mod conn;
+
 pub const USER_AGENT: &'static str = concat!("nsq-rust/", env!("CARGO_PKG_VERSION"));
+pub use conn::Connection;
+pub use error::Error;
+pub use config::Config;
+pub use producer::Producer;

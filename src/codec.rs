@@ -1,18 +1,46 @@
+// Data Format
+//
+// Data is streamed asynchronously to the client and framed in order to support the various reply bodies, ie:
+//
+// [x][x][x][x][x][x][x][x][x][x][x][x]...
+// |  (int32) ||  (int32) || (binary)
+// |  4-byte  ||  4-byte  || N-byte
+// ------------------------------------...
+//     size     frame type     data
+//
+// A client should expect one of the following frame types:
+//
+// FrameTypeResponse int32 = 0
+// FrameTypeError    int32 = 1
+// FrameTypeMessage  int32 = 2
+//
+// And finally, the message format:
+//
+// [x][x][x][x][x][x][x][x][x][x][x][x][x][x][x][x][x][x][x][x][x][x][x][x][x][x][x][x][x][x]...
+// |       (int64)        ||    ||      (hex string encoded in ASCII)           || (binary)
+// |       8-byte         ||    ||                 16-byte                      || N-byte
+// ------------------------------------------------------------------------------------------...
+//   nanosecond timestamp    ^^                   message ID                       message body
+//                        (uint16)
+//                         2-byte
+//                        attempts
+//
 use std::str;
-use std::io::{self, Cursor};
+use std::io;
 
 use serde_json::{self, Value as JsonValue};
-use bytes::{Buf, BytesMut, BufMut, IntoBuf};
-use tokio_io::codec::{Encoder, Decoder};
+use bytes::{Buf, BytesMut, BufMut};
+use tokio_util::codec::{Encoder, Decoder, LengthDelimitedCodec};
 
-use command::{Command, Body};
-use error::{Result, Error, NsqError};
+use crate::command::{Command, Body};
+use crate::error::{Result, Error, NsqError};
 
-// const SIZE_LEN: u8 = 4;
-// const FRAME_TYPE_LEN: u8 = 4;
-// const TIMESTAMP_LEN: u8 = 8;
-// const ATTEMPTS_LEN: u8 = 2;
-// const MESSAGE_ID_LEN: u8 = 16;
+// const SIZE_LEN: usize = 4;
+// const FRAME_TYPE_LEN: usize = 4;
+// const TIMESTAMP_LEN: usize = 8;
+// const ATTEMPTS_LEN: usize = 2;
+const MESSAGE_ID_LEN: usize = 16;
+const MESSAGE_SIZE_LEN: usize = 4;
 
 const FRAME_TYPE_RESPONSE: i32 = 0;
 const FRAME_TYPE_ERROR:    i32 = 1;
@@ -25,25 +53,29 @@ const CLOSE_WAIT: &str = "CLOSE_WAIT";
 #[derive(Debug)]
 pub struct NsqCodec {
     feature_negotiation: bool,
+
+    // decode nsq response, witch is length delimited protocol
+    length_delimited_codec: LengthDelimitedCodec,
 }
 
 impl NsqCodec {
     pub fn new(feature_negotiation: bool) -> Self {
         Self {
-            feature_negotiation
+            feature_negotiation,
+            length_delimited_codec: LengthDelimitedCodec::new(),
         }
     }
 }
 
 #[derive(Debug)]
 pub enum NsqFramed {
-    Response(Response),
+    Response(RawResponse),
     Error(NsqError),
-    Message(NsqMessage),
+    Message(NsqMsg),
 }
 
 #[derive(Debug)]
-pub struct NsqMessage {
+pub struct NsqMsg{
     timestamp: u64,
     attempts: u16,
     message_id: String,
@@ -51,55 +83,61 @@ pub struct NsqMessage {
 }
 
 #[derive(Debug)]
-pub enum Response {
+pub enum RawResponse {
     Ok,
     Heartbeat,
     CloseWait,
     Json(JsonValue),
 }
 
-impl Encoder for NsqCodec {
-    type Item = Command;
+impl Encoder<Command> for NsqCodec {
     type Error = Error;
 
-    fn encode(&mut self, cmd: Self::Item, buf: &mut BytesMut) -> Result<()> {
-
+    fn encode(&mut self, cmd: Command, buf: &mut BytesMut) -> Result<()> {
         let header = cmd.header();
         buf.reserve(header.len());
         buf.extend(header.as_bytes());
 
-        match cmd.body() {
-            Some(Body::Binary(bin)) => {
-                println!("==== binary");
-                buf.reserve(bin.len() + 4);
-                buf.put_u32_be(bin.len() as u32);
-                buf.extend(bin);
-                println!("==== binary end: len: {}, {:?}", bin.len(), bin);
+        if let Some(body) = cmd.body() {
+            match body {
+                Body::Binary(bin) => {
+                    buf.reserve(bin.len() + 4);
+                    buf.put_u32(bin.len() as u32);
+                    // buf.extend(bin);
+                    buf.put(bin.as_slice());
+                }
+                Body::Messages(msgs) => {
+                    // let len = msgs.iter().map(|msg| msg.len()).fold(0, |acc, len| acc + len);
+                    let body_len = msgs.iter().fold(8, |acc, msg| acc + msg.len() + MESSAGE_SIZE_LEN);
+                    buf.reserve(body_len);
+                    buf.put_u32(body_len as u32);
+                    buf.put_u32(msgs.len() as u32);
+                    let _buf = msgs.iter().fold(buf, |buf, msg| {
+                        buf.put_u32(msg.len() as u32);
+                        buf.put(msg.as_slice());
+                        buf
+                    });
+                }
+                Body::Json(json) => {
+                    let body = serde_json::to_string(&json)?;
+                    println!("{:?}", &body);
+                    let body = body.as_bytes();
+                    buf.reserve(body.len() + 4);
+                    buf.put_u32(body.len() as u32);
+                    // buf.extend(body);
+                    buf.put(body);
+                }
             }
-            Some(Body::Messages(msgs)) => {
-                let len = msgs.iter().map(|msg| msg.len()).fold(0, |acc, len| acc + len);
-                let mut bufs: Vec<u8> = Vec::with_capacity(len + 4);
-                bufs.put_u32_be(len as u32);
-                let bufs = msgs.iter().fold(bufs, |mut bufs, msg| {
-                    bufs.put_u32_be(msg.len() as u32);
-                    bufs.put(msg);
-                    bufs
-                });
-                buf.reserve(bufs.len());
-                buf.extend(bufs);
-            }
-            Some(Body::Json(json)) => {
-                let body = serde_json::to_string(&json)?;
-                let body = body.as_bytes();
-                buf.reserve(body.len() + 4);
-                buf.put_u32_be(body.len() as u32);
-                buf.extend(body);
-            }
-
-            _ => {}
         }
 
         Ok(())
+    }
+}
+
+impl Encoder<Command> for Box<NsqCodec> {
+    type Error = Error;
+    fn encode(&mut self, cmd: Command, buf: &mut BytesMut) -> Result<()> {
+        self.as_mut().encode(cmd, buf)
     }
 }
 
@@ -108,25 +146,16 @@ impl Decoder for NsqCodec {
     type Error = Error;
 
     fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>> {
-        {
-            let buf_len = buf.len();
+        let mut buf = match self.length_delimited_codec.decode(buf)? {
+            Some(buf) => buf,
+            None => return Ok(None),
+        };
 
-            if buf_len < 8 {
-                return Ok(None)
-            }
+        let frame_type = buf.get_i32();
 
-            let len = buf.split_at(4).1.into_buf().get_i32_be();
-            if buf_len < len as usize + 4 {
-                return Ok(None)
-            }
-        }
-
-        buf.advance(4);
-        let item_type = buf.split_to(4).into_buf().get_i32_be();
-
-        let item = match item_type {
+        let item = match frame_type {
             FRAME_TYPE_RESPONSE => {
-                NsqFramed::Response(decode_response(buf)?)
+                NsqFramed::Response(decode_raw_response(buf)?)
             }
             FRAME_TYPE_ERROR => {
                 NsqFramed::Error(decode_error(buf)?)
@@ -135,7 +164,7 @@ impl Decoder for NsqCodec {
                 NsqFramed::Message(decode_message(buf))
             }
             _x => {
-                unreachable!("Wrong frame type")
+                return Err(io::Error::new(io::ErrorKind::Other, "unknown frame type").into());
             }
         };
 
@@ -143,16 +172,23 @@ impl Decoder for NsqCodec {
     }
 }
 
-fn decode_message(buf: &mut BytesMut) -> NsqMessage {
-    let mut buf = Cursor::new(buf);
-    let timestamp = buf.get_u64_be();
-    let attempts = buf.get_u16_be();
-    let buf = buf.into_inner();
-    let head = buf.split_to(8);
-    let message_id = str::from_utf8(&head).unwrap().to_string();
-    let body       = buf;
+impl Decoder for Box<NsqCodec> {
+    type Item = NsqFramed;
+    type Error = Error;
 
-    NsqMessage {
+    fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>> {
+        self.as_mut().decode(buf)
+    }
+}
+
+fn decode_message(mut buf: BytesMut) -> NsqMsg{
+    let timestamp = buf.get_u64();
+    let attempts = buf.get_u16();
+    let buf = buf.bytes();
+    let (head, body) = buf.split_at(MESSAGE_ID_LEN);
+    let message_id = str::from_utf8(&head).unwrap().to_string();
+
+    NsqMsg {
         timestamp: timestamp,
         attempts: attempts,
         message_id: message_id,
@@ -160,9 +196,8 @@ fn decode_message(buf: &mut BytesMut) -> NsqMessage {
     }
 }
 
-fn decode_error(buf: &mut BytesMut) -> Result<NsqError> {
-    let err = buf.take();
-    let err = str::from_utf8(&err)?;
+fn decode_error(buf: BytesMut) -> Result<NsqError> {
+    let err = str::from_utf8(buf.bytes())?;
     let err = match err.find(" ") {
         Some(idx) => {
             let (code, desc) = err.split_at(idx);
@@ -175,22 +210,11 @@ fn decode_error(buf: &mut BytesMut) -> Result<NsqError> {
     Ok(err)
 }
 
-fn decode_response(buf: &mut BytesMut) -> Result<Response> {
-    let buf = buf.take();
-
-    match str::from_utf8(&buf) {
-        Ok(OK_RESPONSE) => Ok(Response::Ok),
-        Ok(CLOSE_WAIT) => Ok(Response::CloseWait),
-        Ok(HEARTBEAT_RESPONSE) => Ok(Response::Heartbeat),
-        Ok(body) => {
-            let json = match serde_json::from_str(body) {
-                Ok(json) => json,
-                Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e).into()),
-            };
-            Ok(Response::Json(json))
-        }
-        Err(e) => {
-            Err(io::Error::new(io::ErrorKind::Other, e).into())
-        }
+fn decode_raw_response(buf: BytesMut) -> Result<RawResponse> {
+    match str::from_utf8(buf.bytes())? {
+        OK_RESPONSE => Ok(RawResponse::Ok),
+        CLOSE_WAIT => Ok(RawResponse::CloseWait),
+        HEARTBEAT_RESPONSE => Ok(RawResponse::Heartbeat),
+        body => Ok(RawResponse::Json(serde_json::from_str(body)?)),
     }
 }
