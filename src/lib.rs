@@ -8,8 +8,7 @@
 //!
 //! Producing messages can be done by creating an instance of a Producer.
 //!
-//! ```rust
-//! ```
+//! See [example](examples/producer.rs)
 
 mod codec;
 mod error;
