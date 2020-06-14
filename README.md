@@ -14,3 +14,7 @@ NSQ in Rust
 ## Notes
 
 Work in progress
+
+## License
+
+See [LICENSE-MIT](LICENSE-MIT).
