@@ -13,7 +13,7 @@
 mod codec;
 mod error;
 pub mod config;
-mod producer;
+pub mod producer;
 mod consumer;
 
 pub mod command;

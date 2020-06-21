@@ -8,6 +8,7 @@ pub enum Error {
     Utf8Error(std::str::Utf8Error),
     JsonError(serde_json::Error),
     NsqError(NsqError),
+    #[cfg(feature = "tls")]
     TlsError(native_tls::Error),
     SnapError(snap::Error),
     DeflateCompressError(flate2::CompressError),
@@ -56,6 +57,7 @@ impl std::error::Error for Error {
             Utf8Error(e) => Some(e),
             JsonError(e) => Some(e),
             NsqError(e) => Some(e),
+            #[cfg(feature = "tls")]
             TlsError(e) => Some(e),
             SnapError(e) => Some(e),
             DeflateCompressError(e) => Some(e),
@@ -73,6 +75,7 @@ impl std::fmt::Display for Error {
             Utf8Error(e) => e.fmt(f),
             JsonError(e) => e.fmt(f),
             NsqError(e) => e.fmt(f),
+            #[cfg(feature = "tls")]
             TlsError(e) => e.fmt(f),
             SnapError(e) => e.fmt(f),
             DeflateCompressError(e) => e.fmt(f),
@@ -106,6 +109,7 @@ impl From<::serde_json::Error> for Error {
     }
 }
 
+#[cfg(feature = "tls")]
 impl From<::native_tls::Error> for Error {
     fn from(e: native_tls::Error) -> Error {
         Error::TlsError(e)

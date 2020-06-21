@@ -69,31 +69,27 @@ impl Producer {
         let (tx, rx) = futures::channel::oneshot::channel();
         let (sink, mut stream) = self.conn.split();
         let handler = tokio::spawn(async move {
-            loop {
-                log::debug!("read loop");
-                match stream.next().await {
-                    Some(Ok(Response::Ok)) => {
+            log::debug!("read loop");
+            while let Some(res) = stream.next().await {
+                match res {
+                    Ok(Response::Ok) => {
                         log::debug!("Response Ok");
                         continue;
                     }
-                    Some(Ok(Response::Msg(_))) => {
+                    Ok(Response::Msg(_)) => {
                         unreachable!();
                     }
-                    Some(Ok(Response::Err(e))) => {
+                    Ok(Response::Err(e)) => {
                         log::debug!("Response err: {:?}", e);
                         let _ = tx.send(e.into());
                         break;
                     }
-                    Some(Err(e)) => {
+                    Err(e) => {
                         log::debug!("rx err: {:?}", e);
                         let _ = tx.send(e);
                         break;
                     }
-                    None => {
-                        log::debug!("tx dropped");
-                        break;
-                    }
-                };
+                }
             }
             log::debug!("exit read loop");
         });

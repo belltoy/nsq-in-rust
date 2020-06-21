@@ -93,7 +93,7 @@ pub struct AuthResponse {
 
 impl Connection {
     pub async fn connect<A: Into<SocketAddr>>(addr: A, config: &Config) -> Result<Self, Error> {
-        let transport = connect(addr, config).await?;
+        let (transport, _identify) = connect(addr, config).await?;
         Ok(Self(transport))
     }
 
@@ -158,7 +158,7 @@ impl Sink<Command> for ConnSink {
     }
 }
 
-async fn connect<A: Into<SocketAddr>>(addr: A, config: &Config) -> Result<Heartbeat, Error> {
+async fn connect<A: Into<SocketAddr>>(addr: A, config: &Config) -> Result<(Heartbeat, IdentifyResponse), Error> {
     let tcp = TcpStream::connect(addr.into()).await?;
     let nsq_codec = NsqCodec::new(true);
     let mut framed = Framed::new(tcp, Codec::new(nsq_codec));
@@ -238,7 +238,7 @@ async fn connect<A: Into<SocketAddr>>(addr: A, config: &Config) -> Result<Heartb
     }
 
     // handle heartbeat
-    Ok(Heartbeat::new(framed))
+    Ok((Heartbeat::new(framed), identify))
 }
 
 async fn upgrade_tls(domain: &str, framed: Framed<TcpStream, Codec>) -> Result<Framed<BaseIo, Codec>, Error> {
