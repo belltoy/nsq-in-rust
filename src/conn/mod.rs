@@ -7,6 +7,7 @@ use futures::prelude::*;
 mod snappy;
 mod deflate;
 mod heartbeat;
+mod reconnect;
 pub mod connection;
 mod codec;
 
