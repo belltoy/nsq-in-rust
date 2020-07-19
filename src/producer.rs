@@ -8,6 +8,8 @@ use futures::{
     channel::oneshot::Receiver,
 };
 
+use tracing::debug;
+
 use crate::config::Config;
 use crate::error::Error;
 use crate::command::{Command, MessageBody};
@@ -57,6 +59,19 @@ impl Producer {
         self.response().await
     }
 
+    // Ping causes the Producer to connect to it's configured nsqd (if not already
+    // connected) and send a `Nop` command, returning any error that might occur.
+    //
+    // TODO reconnect
+    //
+    // This method can be used to verify that a newly-created Producer instance is
+    // configured correctly, rather than relying on the lazy "connect on Publish"
+    // behavior of a Producer.
+    pub async fn ping(&mut self) -> Result<(), Error> {
+        self.conn.send(Command::Nop).await?;
+        Ok(())
+    }
+
     async fn response(&mut self) -> Result<(), Error> {
         match self.conn.receive().await? {
             Response::Ok => Ok(()),
@@ -69,29 +84,29 @@ impl Producer {
         let (tx, rx) = futures::channel::oneshot::channel();
         let (sink, mut stream) = self.conn.split();
         let handler = tokio::spawn(async move {
-            log::debug!("read loop");
+            debug!("read loop");
             while let Some(res) = stream.next().await {
                 match res {
                     Ok(Response::Ok) => {
-                        log::debug!("Response Ok");
+                        debug!("Response Ok");
                         continue;
                     }
                     Ok(Response::Msg(_)) => {
                         unreachable!();
                     }
                     Ok(Response::Err(e)) => {
-                        log::debug!("Response err: {:?}", e);
+                        debug!("Response err: {:?}", e);
                         let _ = tx.send(e.into());
                         break;
                     }
                     Err(e) => {
-                        log::debug!("rx err: {:?}", e);
+                        debug!("rx err: {:?}", e);
                         let _ = tx.send(e);
                         break;
                     }
                 }
             }
-            log::debug!("exit read loop");
+            debug!("exit read loop");
         });
 
         (SinkProducer {

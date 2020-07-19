@@ -4,6 +4,7 @@ use futures::prelude::*;
 use futures::ready;
 use tokio_util::codec::Framed;
 
+use crate::codec::NsqCodec;
 use crate::error::Error;
 use crate::{
     codec::{
@@ -13,14 +14,11 @@ use crate::{
     conn::Response,
 };
 use crate::command::Command;
-use super::{
-    codec::Codec,
-    connection::BaseIo,
-};
 
-type InnerFramed = Framed<BaseIo, Codec>;
+use super::connection::AsyncRW;
+type InnerFramed = Framed<Box<dyn AsyncRW + Send + Unpin + 'static>, NsqCodec>;
 
-pub(crate) struct Heartbeat {
+pub struct Heartbeat {
     inner: InnerFramed,
     response_remaining: usize,
     status: Status,
@@ -32,12 +30,12 @@ enum Status {
 }
 
 impl Heartbeat {
-    pub fn new(inner: InnerFramed) -> Self {
+    pub(crate) fn new(inner: InnerFramed) -> Self {
         Self { inner, response_remaining: 0, status: Status::Reading }
     }
 
     fn start_pong(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Error>> {
-        ready!(Pin::new(&mut self.inner).poll_ready(cx))?;
+        ready!(Pin::new(&mut self.inner).poll_ready(cx)?);
         while self.response_remaining > 0 {
             Pin::new(&mut self.inner).start_send(Command::Nop)?;
             self.response_remaining -= 1;
@@ -47,7 +45,7 @@ impl Heartbeat {
     }
 
     fn poll_pong(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Error>> {
-        ready!(Pin::new(&mut self.inner).poll_flush(cx))?;
+        ready!(Pin::new(&mut self.inner).poll_flush(cx)?);
         self.status = Status::Reading;
         Poll::Ready(Ok(()))
     }
@@ -58,12 +56,12 @@ impl Stream for Heartbeat {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         if self.response_remaining > 0 {
-            ready!(self.as_mut().start_pong(cx))?;
+            ready!(self.as_mut().start_pong(cx)?);
         }
 
         match self.status {
             Status::Responding => {
-                ready!(self.as_mut().poll_pong(cx))?;
+                ready!(self.as_mut().poll_pong(cx)?);
             }
             Status::Reading => {}
         }

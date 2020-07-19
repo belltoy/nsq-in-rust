@@ -28,9 +28,11 @@
 use std::str;
 use std::io;
 
+use tracing::trace;
 use serde_json::{self, Value as JsonValue};
 use bytes::{Buf, BytesMut, BufMut};
-use tokio_util::codec::{Encoder, Decoder, LengthDelimitedCodec};
+use tokio_util::codec::LengthDelimitedCodec;
+pub(crate) use tokio_util::codec::{Encoder, Decoder};
 
 use crate::command::{Command, Body};
 use crate::error::{Result, Error, NsqError};
@@ -75,7 +77,7 @@ pub enum NsqFramed {
 }
 
 #[derive(Debug)]
-pub struct NsqMsg{
+pub struct NsqMsg {
     timestamp: u64,
     attempts: u16,
     message_id: String,
@@ -120,7 +122,7 @@ impl Encoder<Command> for NsqCodec {
                 }
                 Body::Json(json) => {
                     let body = serde_json::to_string(&json)?;
-                    println!("{:?}", &body);
+                    trace!("send json: {}", &body);
                     let body = body.as_bytes();
                     buf.reserve(body.len() + 4);
                     buf.put_u32(body.len() as u32);
@@ -161,7 +163,7 @@ impl Decoder for NsqCodec {
                 NsqFramed::Error(decode_error(buf)?)
             }
             FRAME_TYPE_MESSAGE => {
-                NsqFramed::Message(decode_message(buf))
+                NsqFramed::Message(decode_message(buf)?)
             }
             _x => {
                 return Err(io::Error::new(io::ErrorKind::Other, "unknown frame type").into());
@@ -181,23 +183,23 @@ impl Decoder for Box<NsqCodec> {
     }
 }
 
-fn decode_message(mut buf: BytesMut) -> NsqMsg{
+fn decode_message(mut buf: BytesMut) -> Result<NsqMsg> {
     let timestamp = buf.get_u64();
     let attempts = buf.get_u16();
-    let buf = buf.bytes();
+    let buf = buf.as_ref();
     let (head, body) = buf.split_at(MESSAGE_ID_LEN);
-    let message_id = str::from_utf8(&head).unwrap().to_string();
+    let message_id = str::from_utf8(&head)?.to_string();
 
-    NsqMsg {
-        timestamp: timestamp,
-        attempts: attempts,
-        message_id: message_id,
+    Ok(NsqMsg {
+        timestamp,
+        attempts,
+        message_id,
         body: body.to_vec(),
-    }
+    })
 }
 
 fn decode_error(buf: BytesMut) -> Result<NsqError> {
-    let err = str::from_utf8(buf.bytes())?;
+    let err = str::from_utf8(buf.as_ref())?;
     let err = match err.find(" ") {
         Some(idx) => {
             let (code, desc) = err.split_at(idx);
@@ -211,7 +213,7 @@ fn decode_error(buf: BytesMut) -> Result<NsqError> {
 }
 
 fn decode_raw_response(buf: BytesMut) -> Result<RawResponse> {
-    match str::from_utf8(buf.bytes())? {
+    match str::from_utf8(buf.as_ref())? {
         OK_RESPONSE => Ok(RawResponse::Ok),
         CLOSE_WAIT => Ok(RawResponse::CloseWait),
         HEARTBEAT_RESPONSE => Ok(RawResponse::Heartbeat),

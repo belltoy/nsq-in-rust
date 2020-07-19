@@ -4,12 +4,9 @@ use crate::command::Command;
 
 use futures::prelude::*;
 
-mod snappy;
 mod deflate;
 mod heartbeat;
-mod reconnect;
 pub mod connection;
-mod codec;
 
 pub(crate) trait Transport: Stream<Item = Result<NsqFramed, Error>> + Sink<Command, Error = Error> + Unpin {}
 pub(crate) trait MessageStream: Stream<Item = Result<Response, Error>> + Sink<Command, Error = Error> + Unpin {}

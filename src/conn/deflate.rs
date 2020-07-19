@@ -1,59 +1,72 @@
-use crate::{
-    command::Command,
-    error::Error,
-    codec::{
-        NsqCodec,
-        NsqFramed,
-    },
-};
-use tokio_util::codec::{Encoder, Decoder};
-use bytes::BytesMut;
-use flate2::{
-    Compress,
-    Compression,
-    Decompress,
-    FlushCompress,
-    FlushDecompress,
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, BufReader};
+use async_compression::Level;
+use async_compression::tokio::{
+    bufread::DeflateDecoder,
+    write::DeflateEncoder,
 };
 
-pub(crate) struct DeflateCodec {
-    inner_codec: NsqCodec,
-    compress: Compress,
-    decompress: Decompress,
+#[derive(Debug)]
+pub struct DeflateStream<R, W>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    reader: BufReader<DeflateDecoder<BufReader<R>>>,
+    writer: DeflateEncoder<W>,
 }
 
-impl DeflateCodec {
-    pub fn new(codec: NsqCodec, level: u32) -> Self {
-        let compress = Compress::new(Compression::new(level), false);
-        let decompress = Decompress::new(false);
+impl<R, W> DeflateStream<R, W>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    pub fn new(reader: R, writer: W, level: u32) -> Self {
+        let writer = DeflateEncoder::with_quality(writer, Level::Precise(level));
+        let reader = BufReader::new(DeflateDecoder::new(BufReader::new(reader)));
         Self {
-            inner_codec: codec,
-            compress,
-            decompress,
+            reader,
+            writer,
         }
     }
 }
 
-impl Decoder for DeflateCodec {
-    type Item = NsqFramed;
-    type Error = Error;
+impl<R, W> AsyncWrite for DeflateStream<R, W>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, std::io::Error>> {
+        Pin::new(&mut self.writer).poll_write(cx, buf)
+    }
 
-    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        let mut buf = BytesMut::with_capacity(1024);
-        self.decompress.decompress(src, &mut buf, FlushDecompress::None)?;
-        // let len = decompress_len(&src)?;
-        // let _decompressed_size = self.decoder.decompress(src.as_ref(), buf.as_mut())?;
-        self.inner_codec.decode(&mut buf)
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        Pin::new(&mut self.writer).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
+        Pin::new(&mut self.writer).poll_shutdown(cx)
     }
 }
 
-impl Encoder<Command> for DeflateCodec {
-    type Error = Error;
-
-    fn encode(&mut self, item: Command, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        let mut buf = BytesMut::with_capacity(1024);
-        self.inner_codec.encode(item, &mut buf)?;
-        self.compress.compress(&buf, dst.as_mut(), FlushCompress::None)?;
-        Ok(())
+impl<R, W> AsyncRead for DeflateStream<R, W>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        Pin::new(&mut self.reader).poll_read(cx, buf)
     }
 }

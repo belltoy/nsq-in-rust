@@ -30,42 +30,51 @@
 //! See [NSQ TCP Protocol Spec](https://nsq.io/clients/tcp_protocol_spec.html) to read more.
 
 use std::io;
-use std::mem::MaybeUninit;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 use std::net::SocketAddr;
+use std::sync::Arc;
 
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BytesMut};
 use tokio::net::TcpStream;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio_snappy::SnappyIO;
 use futures::{
     prelude::*,
     stream::{SplitSink, SplitStream},
 };
-use tokio_util::codec::{Framed, FramedParts};
-use serde_derive::Deserialize;
-#[cfg(feature = "tls")]
-use native_tls::TlsConnector;
-#[cfg(feature = "tls")]
-use tokio_native_tls::TlsStream;
-use log::{debug, error};
+use tokio_util::codec::Framed;
+use serde::Deserialize;
+#[cfg(feature = "tls-native")]
+use tokio_native_tls::{TlsConnector, TlsStream, native_tls};
+#[cfg(feature = "tls-tokio")]
+use tokio_rustls::{
+    rustls::RootCertStore,
+    rustls::client::{
+        ClientConfig,
+        ServerName,
+    },
+    TlsConnector, client::TlsStream,
+};
+use tracing::{trace, debug, error};
 
 use crate::error::Error;
-use crate::codec::{NsqCodec, NsqFramed, RawResponse};
+use crate::codec::{Decoder, Encoder, NsqCodec, NsqFramed, RawResponse};
 use crate::command::Command;
 use crate::conn::{Heartbeat, Response};
-use super::codec::Codec;
 use crate::config::{Config, TlsConfig};
 use crate::producer::Producer;
+use crate::conn::deflate::DeflateStream;
 
 pub struct Connection(Heartbeat);
 
-trait AsyncReadWrite: AsyncRead + AsyncWrite + Unpin {}
-impl AsyncReadWrite for TcpStream {}
+pub type ConnSink = SplitSink<Heartbeat, Command>;
+pub type ConnStream = SplitStream<Heartbeat>;
 
-#[cfg(feature = "tls")]
-impl<S> AsyncReadWrite for TlsStream<S>
-    where S: AsyncRead + AsyncWrite + Unpin {}
+pub trait AsyncRW: AsyncRead + AsyncWrite {}
+impl<T> AsyncRW for T where T: AsyncRead + AsyncWrite {}
+
+// #[cfg(feature = "tls-native,tls-tokio")]
+// impl<S> AsyncReadWrite for TlsStream<S>
+//     where S: AsyncRead + AsyncWrite + Unpin {}
 
 #[derive(Debug, Deserialize)]
 struct IdentifyResponse {
@@ -117,67 +126,26 @@ impl Connection {
     }
 
     pub fn split(self) -> (ConnSink, ConnStream) {
-        let (sink, stream) = self.0.split();
-        (ConnSink(sink), ConnStream(stream))
-    }
-}
-
-pub struct ConnSink(SplitSink<Heartbeat, Command>);
-pub struct ConnStream(SplitStream<Heartbeat>);
-
-impl Stream for ConnStream {
-    type Item = Result<Response, Error>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        let s: Pin<&mut SplitStream<_>> = Pin::new(&mut self.0);
-        s.poll_next(cx)
-    }
-}
-
-impl Sink<Command> for ConnSink {
-    type Error = Error;
-
-    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
-        let s: Pin<&mut SplitSink<_, _>> = Pin::new(&mut self.0);
-        s.poll_ready(cx)
-    }
-
-    fn start_send(mut self: Pin<&mut Self>, item: Command) -> Result<(), Self::Error> {
-        let s: Pin<&mut SplitSink<_, _>> = Pin::new(&mut self.0);
-        s.start_send(item)
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
-        let s: Pin<&mut SplitSink<_, _>> = Pin::new(&mut self.0);
-        s.poll_flush(cx)
-    }
-
-    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
-        let s: Pin<&mut SplitSink<_, _>> = Pin::new(&mut self.0);
-        s.poll_close(cx)
+        self.0.split()
     }
 }
 
 async fn connect<A: Into<SocketAddr>>(addr: A, config: &Config) -> Result<(Heartbeat, IdentifyResponse), Error> {
-    let tcp = TcpStream::connect(addr.into()).await?;
-    let nsq_codec = NsqCodec::new(true);
-    let mut framed = Framed::new(tcp, Codec::new(nsq_codec));
-    framed.send(Command::Version).await?;
+    let mut tcp = TcpStream::connect(addr.into()).await?;
+    let mut nsq_codec = NsqCodec::new(true);
 
+    let mut write_buf = BytesMut::new();
+    nsq_codec.encode(Command::Version, &mut write_buf)?;
     let identify = config.identify()?;
-    debug!("send identify: {:?}", &identify);
-    framed.send(identify).await?;
+    trace!("send identify: {:?}", &identify);
+    nsq_codec.encode(identify, &mut write_buf)?;
 
-    let response = if let Some(response) = framed.next().await {
-        response
-    } else {
-        return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
-    };
-
-    debug!("identify response: {:?}", response);
+    tcp.write_all(&write_buf.split()[..]).await?;
+    let response = read_response(&mut tcp, &mut nsq_codec).await?;
+    trace!("identify response: {:?}", response);
 
     // TODO
-    let identify: IdentifyResponse = match response? {
+    let identify: IdentifyResponse = match response {
         // feature_negotiation false response Ok
         NsqFramed::Response(RawResponse::Ok) => {
             unreachable!();
@@ -208,29 +176,56 @@ async fn connect<A: Into<SocketAddr>>(addr: A, config: &Config) -> Result<(Heart
             return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
         }
     };
+    let socket = tcp;
+    // let socket = BaseIo::Tcp(tcp);
+    // let codec = Codec::new(nsq_codec);
+    // let mut framed = Framed::new(BaseIo::Tcp(tcp), codec);
 
-    let mut framed = {
-        if identify.tls_v1 {
-            let domain = match config.tls_v1 {
-                TlsConfig::Enabled{ref domain, ..} => domain.as_str(),
-                _ => unreachable!(),
-            };
-            upgrade_tls(domain, framed).await?
+    // let socket = {
+    //     if identify.tls_v1 {
+    //         let tls_config = config.tls_v1.as_ref().unwrap();
+    //         let domain = match config.tls_v1 {
+    //             Some(TlsConfig{ref domain, ..}) => domain.as_str(),
+    //             _ => unreachable!(),
+    //         };
+    //         let tls_stream = upgrade_tls(domain, tcp, tls_config, &mut nsq_codec).await?;
+    //         BaseIo::Tls(tls_stream)
+    //     } else {
+    //         BaseIo::Tcp(tcp)
+    //         // let FramedParts { io, codec, read_buf, write_buf, .. } = framed.into_parts();
+    //         // let framed = Framed::new(BaseIo::Tcp(io), codec);
+    //         // let mut parts = framed.into_parts();
+    //         // parts.read_buf = read_buf;
+    //         // parts.write_buf = write_buf;
+    //         // Framed::from_parts(parts)
+    //     }
+    // };
+
+    let boxed_stream: Box<dyn AsyncRW + Send + Unpin> = if identify.snappy {
+        let mut snappy_stream = upgrade_snappy(socket);
+        if let NsqFramed::Response(RawResponse::Ok) = read_response(&mut snappy_stream, &mut nsq_codec).await? {
+            Box::new(snappy_stream)
         } else {
-            let FramedParts { io, codec, read_buf, write_buf, .. } = framed.into_parts();
-            let framed = Framed::new(BaseIo::Tcp(io), codec);
-            let mut parts = framed.into_parts();
-            parts.read_buf = read_buf;
-            parts.write_buf = write_buf;
-            Framed::from_parts(parts)
+            return Err(Error::from(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "compression negotiation expected OK",
+            )));
         }
-    };
-
-    if identify.snappy {
-        framed.codec_mut().use_snappy();
     } else if identify.deflate {
-        framed.codec_mut().use_deflate(identify.deflate_level);
-    }
+        let (read_half, write_half) = tokio::io::split(socket);
+        let mut deflate_stream = upgrade_deflate(read_half, write_half, identify.deflate_level);
+        if let NsqFramed::Response(RawResponse::Ok) = read_response(&mut deflate_stream, &mut nsq_codec).await? {
+            Box::new(deflate_stream)
+        } else {
+            return Err(Error::from(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "compression negotiation expected OK",
+            )));
+        }
+    } else {
+        Box::new(socket)
+    };
+    let mut framed = Framed::new(boxed_stream, nsq_codec);
 
     if identify.auth_required {
         let auth_response = auth(config, &mut framed).await?;
@@ -241,21 +236,58 @@ async fn connect<A: Into<SocketAddr>>(addr: A, config: &Config) -> Result<(Heart
     Ok((Heartbeat::new(framed), identify))
 }
 
-async fn upgrade_tls(domain: &str, framed: Framed<TcpStream, Codec>) -> Result<Framed<BaseIo, Codec>, Error> {
-    let connector = TlsConnector::new().unwrap();
-    let connector = tokio_native_tls::TlsConnector::from(connector);
-    let FramedParts { io, codec, read_buf, write_buf, .. } = framed.into_parts();
-    let tls_socket = connector.connect(domain, io).await?;
-    let framed = Framed::new(BaseIo::Tls(tls_socket), codec);
-    let mut parts = framed.into_parts();
-    parts.read_buf = read_buf;
-    parts.write_buf = write_buf;
-    let mut framed = Framed::from_parts(parts);
-    if let Some(Ok(NsqFramed::Response(RawResponse::Ok))) = framed.next().await {
-        Ok(framed)
+#[cfg(feature = "tls-tokio")]
+async fn upgrade_tls(domain: &str, inner: TcpStream, tls_config: &TlsConfig, nsq_codec: &mut NsqCodec)
+    -> Result<TlsStream<TcpStream>, Error>
+{
+    // todo!()
+    // TODO from config
+    let root_certs = RootCertStore { roots: vec![] };
+    let client_config = ClientConfig::builder()
+        .with_safe_defaults()
+        .with_root_certificates(root_certs)
+        .with_no_client_auth();
+    let client_config = Arc::new(client_config);
+    let connector = TlsConnector::from(client_config);
+    // TODO FIXME data from peer may have already read in the buffer
+    let mut tls_socket = connector.connect(ServerName::try_from(tls_config.domain.as_str())?, inner).await?;
+    if let NsqFramed::Response(RawResponse::Ok) = read_response(&mut tls_socket, nsq_codec).await? {
+        // Ok(Box::new(tls_socket))
+        Ok(tls_socket)
     } else {
         Err(io::Error::from(io::ErrorKind::UnexpectedEof).into())
     }
+}
+
+#[cfg(feature = "tls-native")]
+async fn upgrade_tls<T>(domain: &str, inner: T, tls_config: &TlsConfig, nsq_codec: &mut NsqCodec)
+    // -> Result<TlsStream, Error>
+    -> Result<Box<dyn AsyncRead + AsyncWrite + Unpin>, Error>
+    where T: AsyncRead + AsyncWrite + Unpin,
+{
+    let connector = native_tls::TlsConnector::new().unwrap();
+    let connector = TlsConnector::from(connector);
+    // TODO FIXME data from peer may have already read in the buffer
+    let tls_socket = connector.connect(domain, inner).await?;
+    if let NsqFramed::Response(RawResponse::ok) = read_response(&mut tls_socket, nsq_codec).await?{
+        Ok(Box::new(tls_socket))
+    } else {
+        Err(io::Error::from(io::ErrorKind::UnexpectedEof).into())
+    }
+}
+
+fn upgrade_deflate<R, W>(reader: R, writer: W, level: u32) -> DeflateStream<R, W>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    DeflateStream::new(reader, writer, level)
+}
+
+fn upgrade_snappy<T>(inner: T) -> SnappyIO<T>
+    where T: AsyncRead + AsyncWrite + Unpin,
+{
+    SnappyIO::new(inner)
 }
 
 async fn auth<T>(config: &Config, transport: &mut T) -> Result<AuthResponse, Error>
@@ -290,63 +322,18 @@ async fn auth<T>(config: &Config, transport: &mut T) -> Result<AuthResponse, Err
     Ok(response)
 }
 
-pub(crate) enum BaseIo {
-    Tcp(TcpStream),
-    Tls(TlsStream<TcpStream>),
-}
-
-impl AsyncRead for BaseIo {
-    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context, buf: &mut [u8]) -> Poll<Result<usize, tokio::io::Error>> {
-        match *self {
-            BaseIo::Tcp(ref mut s) => Pin::new(s).poll_read(cx, buf),
-            BaseIo::Tls(ref mut s) => Pin::new(s).poll_read(cx, buf),
-        }
-    }
-
-    unsafe fn prepare_uninitialized_buffer(&self, _buf: &mut [MaybeUninit<u8>]) -> bool {
-        false
-    }
-
-    fn poll_read_buf<B: BufMut>(mut self: Pin<&mut Self>, cx: &mut Context, buf: &mut B) -> Poll<Result<usize, tokio::io::Error>>
-    where
-        Self: Sized,
-    {
-        match *self {
-            BaseIo::Tcp(ref mut s) => Pin::new(s).poll_read_buf(cx, buf),
-            BaseIo::Tls(ref mut s) => Pin::new(s).poll_read_buf(cx, buf),
-        }
-    }
-}
-
-impl AsyncWrite for BaseIo {
-    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context, buf: &[u8]) -> Poll<Result<usize, tokio::io::Error>> {
-        match *self {
-            BaseIo::Tcp(ref mut s) => Pin::new(s).poll_write(cx, buf),
-            BaseIo::Tls(ref mut s) => Pin::new(s).poll_write(cx, buf),
-        }
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), tokio::io::Error>> {
-        match *self {
-            BaseIo::Tcp(ref mut s) => Pin::new(s).poll_flush(cx),
-            BaseIo::Tls(ref mut s) => Pin::new(s).poll_flush(cx),
-        }
-    }
-
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), tokio::io::Error>> {
-        match *self {
-            BaseIo::Tcp(ref mut s) => Pin::new(s).poll_shutdown(cx),
-            BaseIo::Tls(ref mut s) => Pin::new(s).poll_shutdown(cx),
-        }
-    }
-
-    fn poll_write_buf<B: Buf>(mut self: Pin<&mut Self>, cx: &mut Context, buf: &mut B) -> Poll<Result<usize, tokio::io::Error>>
-    where
-        Self: Sized,
-    {
-        match *self {
-            BaseIo::Tcp(ref mut s) => Pin::new(s).poll_write_buf(cx, buf),
-            BaseIo::Tls(ref mut s) => Pin::new(s).poll_write_buf(cx, buf),
-        }
+async fn read_response<T>(socket: &mut T, nsq_codec: &mut NsqCodec) -> Result<NsqFramed, Error>
+where T: AsyncRead + Unpin,
+{
+    let mut read_buf = BytesMut::new();
+    read_buf.resize(4, 0);
+    socket.read_exact(&mut read_buf[..4]).await?;
+    let len = (&read_buf[..4]).get_i32() as usize;
+    read_buf.resize(len + 4, 0);
+    socket.read_exact(&mut read_buf[4..len + 4]).await?;
+    if let Some(response) = nsq_codec.decode(&mut read_buf)? {
+        Ok(response)
+    } else {
+        Err(io::Error::from(io::ErrorKind::UnexpectedEof).into())
     }
 }

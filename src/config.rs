@@ -1,6 +1,5 @@
 use std::time::Duration;
-use serde::ser::{Serializer, SerializeMap};
-use serde_derive::Serialize;
+use serde::{Serialize, Serializer, ser::SerializeMap};
 use crate::command::Command;
 use crate::Error;
 
@@ -11,7 +10,7 @@ pub struct Config {
     pub user_agent: String,
 
     #[serde(serialize_with = "serialize_tls")]
-    pub tls_v1: TlsConfig,
+    pub tls_v1: Option<TlsConfig>,
 
     #[serde(flatten, serialize_with = "serialize_compress")]
     pub compress: Compress,
@@ -68,7 +67,7 @@ impl Default for Config {
             client_id: "nsq_in_rust".into(),
             hostname: ::hostname::get_hostname().unwrap_or_else(|| "unknown".to_owned()),
             user_agent: crate::USER_AGENT.into(),
-            tls_v1: TlsConfig::Disabled,
+            tls_v1: None,
             compress: Compress::Disabled,
             heartbeat_interval: Duration::from_secs(30),
             max_attempts: 5,
@@ -87,8 +86,8 @@ fn duration_to_ms<S: Serializer>(duration: &Duration, serializer: S) -> Result<S
     serializer.serialize_u64(duration.as_millis() as u64)
 }
 
-fn serialize_tls<S: Serializer>(tls_config: &TlsConfig, serializer: S) -> Result<S::Ok, S::Error> {
-    if tls_config.is_enabled() {
+fn serialize_tls<S: Serializer>(tls_config: &Option<TlsConfig>, serializer: S) -> Result<S::Ok, S::Error> {
+    if tls_config.is_some() {
         serializer.serialize_bool(true)
     } else {
         serializer.serialize_bool(false)
@@ -150,24 +149,20 @@ impl Compress {
 }
 
 #[derive(Debug)]
-pub enum TlsConfig {
-    Enabled {
-        domain: String,
-        root_ca_file: String,
-        cert_file: String,
-        key_file: String,
-        insecure_skip_verify: bool,
-    },
-    Disabled,
-}
+pub struct TlsConfig {
+    pub domain: String,
 
-impl TlsConfig {
-    pub fn is_enabled(&self) -> bool {
-        match self {
-            TlsConfig::Disabled => false,
-            _ => true,
-        }
-    }
+    /// String path to file containing root CA
+    pub root_ca_file: Option<String>,
+
+    /// String path to file containing public key for certificate
+    pub cert_file: Option<String>,
+
+    /// String path to file containing private key for certificate
+    pub key_file: Option<String>,
+
+    /// Bool indicates whether this client should verify server certificates
+    pub insecure_skip_verify: bool,
 }
 
 mod tests {
