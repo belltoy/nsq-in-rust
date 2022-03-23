@@ -148,6 +148,12 @@ impl Compress {
     }
 }
 
+impl Default for Compress {
+    fn default() -> Self {
+        Compress::Disabled
+    }
+}
+
 #[derive(Debug)]
 pub struct TlsConfig {
     pub domain: String,
