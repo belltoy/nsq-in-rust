@@ -9,7 +9,6 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["net", "codec"] }
 reqwest = { version = "0.11", features = ["json"] }
 futures = "0.3"
-hyper = "0.14"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 bytes = "1"
@@ -23,12 +22,12 @@ flate2 = { version = "1", optional = true }
 tokio-snappy = { version = "0.2", optional = true}
 snap = { version = "1", optional = true}
 async-compression = { version = "0.3.12", features = ["deflate", "tokio"] }
+url = "2.2.2"
 
 [dev-dependencies]
 tracing-subscriber = "0.3"
 
 [features]
-# default = ["tls-tokio"]
 default = ["tls-tokio", "snappy", "deflate"]
 snappy = ["snap", "tokio-snappy"]
 deflate = ["flate2"]

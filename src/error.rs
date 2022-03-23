@@ -1,6 +1,7 @@
 use std::io;
 
 pub type Result<T> = ::std::result::Result<T, Error>;
+pub type UrlParseError = url::ParseError;
 
 #[derive(Debug)]
 pub enum Error {
@@ -17,6 +18,8 @@ pub enum Error {
     DeflateDecompressError(flate2::DecompressError),
     HttpError(reqwest::Error),
     Auth(String),
+    UrlParseError(UrlParseError),
+    UnknownError(String),
 }
 
 #[derive(Debug)]
@@ -68,6 +71,7 @@ impl std::error::Error for Error {
             DeflateCompressError(e) => Some(e),
             DeflateDecompressError(e) => Some(e),
             HttpError(e) => Some(e),
+            UrlParseError(e) => Some(e),
             _ => None,
         }
     }
@@ -90,6 +94,8 @@ impl std::fmt::Display for Error {
             DeflateDecompressError(e) => e.fmt(f),
             Auth(e) => write!(f, "Auth Error: {}", e),
             HttpError(e) => e.fmt(f),
+            UrlParseError(e) => e.fmt(f),
+            UnknownError(e) => write!(f, "Known Error: {}", e),
         }
     }
 }
@@ -153,5 +159,11 @@ impl From<flate2::DecompressError> for Error {
 impl From<reqwest::Error> for Error {
     fn from(e: reqwest::Error) -> Error {
         Error::HttpError(e)
+    }
+}
+
+impl From<UrlParseError> for Error {
+    fn from(e: UrlParseError) -> Error {
+        Error::UrlParseError(e)
     }
 }

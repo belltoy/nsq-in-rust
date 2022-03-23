@@ -11,10 +11,11 @@
 //! See [example](examples/producer.rs)
 
 mod codec;
-mod error;
+pub mod error;
 pub mod config;
 pub mod producer;
 mod consumer;
+mod lookup;
 
 pub mod command;
 pub mod conn;
@@ -24,3 +25,4 @@ pub use conn::Connection;
 pub use error::Error;
 pub use config::Config;
 pub use producer::Producer;
+pub use lookup::Lookup;
