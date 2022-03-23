@@ -20,7 +20,7 @@ tracing = "0.1"
 tokio-native-tls = { version = "0.3", optional = true }
 tokio-rustls = { version = "0.23", optional = true }
 flate2 = { version = "1", optional = true }
-tokio-snappy = { git = "https://github.com/belltoy/tokio-snappy.git", branch = "master", optional = true}
+tokio-snappy = { version = "0.2", optional = true}
 snap = { version = "1", optional = true}
 async-compression = { version = "0.3.12", features = ["deflate", "tokio"] }
 
