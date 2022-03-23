@@ -59,14 +59,14 @@ impl Producer {
         self.response().await
     }
 
-    // Ping causes the Producer to connect to it's configured nsqd (if not already
-    // connected) and send a `Nop` command, returning any error that might occur.
-    //
-    // TODO reconnect
-    //
-    // This method can be used to verify that a newly-created Producer instance is
-    // configured correctly, rather than relying on the lazy "connect on Publish"
-    // behavior of a Producer.
+    /// Ping causes the Producer to connect to it's configured nsqd (if not already
+    /// connected) and send a `Nop` command, returning any error that might occur.
+    ///
+    /// TODO reconnect
+    ///
+    /// This method can be used to verify that a newly-created Producer instance is
+    /// configured correctly, rather than relying on the lazy "connect on Publish"
+    /// behavior of a Producer.
     pub async fn ping(&mut self) -> Result<(), Error> {
         self.conn.send(Command::Nop).await?;
         Ok(())
