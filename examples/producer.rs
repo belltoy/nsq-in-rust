@@ -4,6 +4,7 @@ use futures::prelude::*;
 use nsq_in_rust::{
     config::{
         Config,
+        Compress,
     },
     Connection,
     Error,
@@ -14,8 +15,11 @@ use tracing::{info, error};
 async fn main() -> Result<(), Error> {
     tracing_subscriber::fmt::init();
 
-    let config: Config = Default::default();
-    // config.compress = Compress::Snappy;
+    let config: Config = Config {
+        // compress: Compress::Snappy,
+        compress: Compress::Deflate{ level: 6 },
+        ..Default::default()
+    };
     let conn = Connection::connect("127.0.0.1:4150".parse::<SocketAddr>().unwrap(), &config).await?;
     let mut producer = conn.into_producer();
     let topic = "foo";
