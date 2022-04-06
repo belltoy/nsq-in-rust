@@ -4,12 +4,12 @@ use std::task::{Context, Poll};
 
 use pin_project::pin_project;
 use futures::{ready, Future, Stream, Sink};
-use tokio::time::Delay;
+use tokio::time::Sleep;
 
 #[pin_project]
 pub(crate) struct Reconnect<F, S, M> {
     #[pin]
-    state: State<F, S, Delay>,
+    state: State<F, S, Sleep>,
     strategy: Strategy,
     mk_connection: M,
     attempts: u32,
@@ -52,12 +52,12 @@ impl<F, S, M> Reconnect<F, S, M> {
                             State::Connecting(fut)
                         }
                         Strategy::Exponential(duration) => {
-                            State::Delaying(tokio::time::delay_for(Duration::from_secs(duration.as_secs() * self.attempts as u64)))
+                            State::Delaying(tokio::time::sleep(Duration::from_secs(duration.as_secs() * self.attempts as u64)))
                         }
                     }
                 }
-                State::Delaying(ref mut delay) => {
-                    ready!(Pin::new(delay).poll(cx));
+                State::Delaying(ref mut sleep) => {
+                    ready!(Pin::new(sleep).poll(cx));
                     let fut = (self.mk_connection)();
                     State::Connecting(fut)
                 }
