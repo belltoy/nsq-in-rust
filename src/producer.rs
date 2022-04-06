@@ -7,7 +7,6 @@ use futures::{
     prelude::*,
     channel::oneshot::Receiver,
 };
-
 use tracing::debug;
 
 use crate::config::Config;
@@ -16,7 +15,7 @@ use crate::command::{Command, MessageBody};
 use crate::conn::{Connection, Response, connection::ConnSink};
 
 pub struct Producer {
-    conn: Connection
+    conn: Connection,
 }
 
 pub struct SinkProducer {
@@ -133,7 +132,8 @@ impl SinkProducer {
 }
 
 impl<S> Sink<S> for SinkProducer
-where S: Into<MessageBody>,
+where
+    S: Into<MessageBody>,
 {
     type Error = Error;
 
@@ -156,5 +156,43 @@ where S: Into<MessageBody>,
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
         ready!(self.as_mut().poll(cx))?;
         Pin::new(&mut self.sink).poll_close(cx)
+    }
+}
+
+pub struct PublishProducer {
+    inner: Connection,
+}
+
+impl From<Connection> for PublishProducer {
+    fn from(inner: Connection) -> Self {
+        PublishProducer { inner }
+    }
+}
+
+impl Stream for PublishProducer {
+    type Item = Result<Response, Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.inner.0).poll_next(cx)
+    }
+}
+
+impl Sink<(String, MessageBody)> for PublishProducer {
+    type Error = Error;
+
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
+        Pin::new(&mut self.inner.0).poll_ready(cx)
+    }
+
+    fn start_send(mut self: Pin<&mut Self>, (topic, msg): (String, MessageBody)) -> Result<(), Self::Error> {
+        Pin::new(&mut self.inner.0).start_send(Command::Pub(topic, msg))
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
+        Pin::new(&mut self.inner.0).poll_flush(cx)
+    }
+
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
+        Pin::new(&mut self.inner.0).poll_close(cx)
     }
 }

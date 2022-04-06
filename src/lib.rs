@@ -15,7 +15,7 @@ pub mod error;
 pub mod config;
 pub mod producer;
 mod consumer;
-mod lookup;
+pub mod lookup;
 
 pub mod command;
 pub mod conn;

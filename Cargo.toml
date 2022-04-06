@@ -25,6 +25,9 @@ async-compression = { version = "0.3.12", features = ["deflate", "tokio"] }
 url = "2.2.2"
 
 [dev-dependencies]
+tower = { version = "0.4.12", features = ["full"] }
+anyhow = "1.0.56"
+tokio-tower = "0.6.0"
 tracing-subscriber = "0.3"
 
 [features]
@@ -33,3 +36,6 @@ snappy = ["snap", "tokio-snappy"]
 deflate = ["flate2"]
 tls-native = ["tokio-native-tls"]
 tls-tokio = ["tokio-rustls"]
+
+[patch.crates-io]
+tokio-snappy = { git = "https://github.com/belltoy/tokio-snappy.git", branch = "master" }
