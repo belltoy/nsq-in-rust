@@ -28,7 +28,7 @@ use nsq_in_rust::{
 use nsq_in_rust::{Lookup, lookup::Producer as LookupProducer};
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
     tracing_subscriber::fmt::init();
 
     let nsq_config = Arc::new(Config::default());
@@ -72,7 +72,9 @@ async fn main() -> Result<()> {
     let mut reconnectable = Reconnect::with_connection(producer, mk_service, target);
 
     for i in 0..100 {
-        loop {
+        let mut attempt = 5;
+        while attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             let rsp = reconnectable.ready()
                 .await
                 .map_err(|e| anyhow::anyhow!("NSQ connection ready error: {:?}", e))?
@@ -85,11 +87,12 @@ async fn main() -> Result<()> {
                     break;
                 }
                 Err(e) => {
-                    warn!("error: {:?}, try again after reconnect", e);
+                    // Retry send after reconnect, in addition, we can use `Retry` layer instead
+                    attempt -= 1;
+                    warn!(error = %e, "Publish error, try again after reconnect");
                 }
             }
         }
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 
     Ok(())
