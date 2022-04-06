@@ -1,4 +1,7 @@
-use std::net::ToSocketAddrs;
+use std::net::{
+    SocketAddr,
+    ToSocketAddrs,
+};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -37,15 +40,42 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error + Send + Sy
     let mut lookup_service = tower::service_fn(|endpointer| {
         fetch_topics_match(endpointer, "smart")
     });
-    let rst = lookup_service.call("http://127.0.0.1:4161").await?;
-    info!("Matched topics info: {:?}", rst);
+
+    let lookups = lookup_service.ready().await?
+        .call("http://127.0.0.1:4161").await?;
+
+    info!("Matched topics info: {:?}", lookups);
+
+    let brokers = lookups.iter().map(|p| {
+        p.broadcast_address.parse::<std::net::IpAddr>()
+            .map_err(anyhow::Error::from)
+            .and_then(|addr| (addr, p.tcp_port).try_into().map_err(From::from))
+    })
+    .filter_map(|addr| {
+        match addr {
+            Ok(addr) => Some(addr),
+            Err(e) => {
+                warn!("Broker address is invalid: {:?}", e);
+                None
+            }
+        }
+    }).collect::<Vec<SocketAddr>>();
+
+    info!("Found brokers: {:?}", brokers);
+
+    if brokers.is_empty() {
+        return Err("No brokers found".into());
+    }
+
+    // Take the first broker from nsqlookupd, for example.
+    let broker = brokers.into_iter().next().unwrap();
 
     // Make a service for nsqd brokers
-    let mut mk_service = tower::service_fn(|(addr, config): (String, Arc<Config>)| async move {
+    let mut mk_service = tower::service_fn(|(addr, config): (_, Arc<_>)| async move {
         make_client(addr, &config).await
     }.boxed()); // `Reconnect` needs the future must be `Unpin`
 
-    let target = ("127.0.0.1:4150".to_string(), Arc::clone(&nsq_config));
+    let target = (broker, Arc::clone(&nsq_config));
     let mut producer = mk_service.make_service(target.clone()).await?;
 
     // Produce by calling the `Service`, check `ready` and `call` publish
