@@ -1,6 +1,6 @@
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, BufReader};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, BufReader, ReadHalf, WriteHalf};
 use async_compression::Level;
 use async_compression::tokio::{
     bufread::DeflateDecoder,
@@ -8,21 +8,20 @@ use async_compression::tokio::{
 };
 
 #[derive(Debug)]
-pub struct DeflateStream<R, W>
+pub struct DeflateStream<T>
 where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
+    T: AsyncRead + AsyncWrite,
 {
-    reader: BufReader<DeflateDecoder<BufReader<R>>>,
-    writer: DeflateEncoder<W>,
+    reader: BufReader<DeflateDecoder<BufReader<ReadHalf<T>>>>,
+    writer: DeflateEncoder<WriteHalf<T>>,
 }
 
-impl<R, W> DeflateStream<R, W>
+impl<T> DeflateStream<T>
 where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
+    T: AsyncRead + AsyncWrite,
 {
-    pub fn new(reader: R, writer: W, level: u32) -> Self {
+    pub fn new(io: T, level: u32) -> Self {
+        let (reader, writer) = tokio::io::split(io);
         let writer = DeflateEncoder::with_quality(writer, Level::Precise(level));
         let reader = BufReader::new(DeflateDecoder::new(BufReader::new(reader)));
         Self {
@@ -32,10 +31,9 @@ where
     }
 }
 
-impl<R, W> AsyncWrite for DeflateStream<R, W>
+impl<T> AsyncWrite for DeflateStream<T>
 where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
+    T: AsyncRead + AsyncWrite,
 {
     fn poll_write(
         mut self: Pin<&mut Self>,
@@ -57,10 +55,9 @@ where
     }
 }
 
-impl<R, W> AsyncRead for DeflateStream<R, W>
+impl<T> AsyncRead for DeflateStream<T>
 where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
+    T: AsyncRead + AsyncWrite,
 {
     fn poll_read(
         mut self: Pin<&mut Self>,

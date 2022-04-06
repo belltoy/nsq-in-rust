@@ -30,9 +30,9 @@
 //! See [NSQ TCP Protocol Spec](https://nsq.io/clients/tcp_protocol_spec.html) to read more.
 
 use std::io;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::net::SocketAddr;
-use std::sync::Arc;
-
 use bytes::{Buf, BytesMut};
 use tokio::net::TcpStream;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -43,31 +43,21 @@ use futures::{
 };
 use tokio_util::codec::Framed;
 use serde::Deserialize;
-#[cfg(feature = "tls-native")]
-use tokio_native_tls::{TlsConnector, TlsStream, native_tls};
-#[cfg(feature = "tls-tokio")]
-use tokio_rustls::{
-    rustls::RootCertStore,
-    rustls::client::{
-        ClientConfig,
-        ServerName,
-    },
-    TlsConnector, client::TlsStream,
-};
+use super::tls::TlsStream;
 use tracing::{trace, debug, error};
 
 use crate::error::Error;
 use crate::codec::{Decoder, Encoder, NsqCodec, NsqFramed, RawResponse};
 use crate::command::Command;
-use crate::conn::{Heartbeat, Response};
+use crate::conn::{Heartbeat, Response, BaseIo};
 use crate::config::{Config, TlsConfig};
 use crate::producer::Producer;
 use crate::conn::deflate::DeflateStream;
 
-pub struct Connection(Heartbeat);
+pub struct Connection(pub(crate) Heartbeat<BaseIo>);
 
-pub type ConnSink = SplitSink<Heartbeat, Command>;
-pub type ConnStream = SplitStream<Heartbeat>;
+pub type ConnSink = SplitSink<Heartbeat<BaseIo>, Command>;
+pub type ConnStream = SplitStream<Heartbeat<BaseIo>>;
 
 pub trait AsyncRW: AsyncRead + AsyncWrite {}
 impl<T> AsyncRW for T where T: AsyncRead + AsyncWrite {}
@@ -102,12 +92,9 @@ pub struct AuthResponse {
 
 impl Connection {
     pub async fn connect<A: Into<SocketAddr>>(addr: A, config: &Config) -> Result<Self, Error> {
-        let (transport, _identify) = connect(addr, config).await?;
+        let (transport, identify) = connect(addr, config).await?;
+        trace!("connected to nsqd, with identify: {:?}", identify);
         Ok(Self(transport))
-    }
-
-    pub fn into_producer(self) -> Producer {
-        Producer::from_connection(self)
     }
 
     /// Send `Command` to the server
@@ -130,7 +117,17 @@ impl Connection {
     }
 }
 
-async fn connect<A: Into<SocketAddr>>(addr: A, config: &Config) -> Result<(Heartbeat, IdentifyResponse), Error> {
+impl From<Connection> for Producer {
+    fn from(conn: Connection) -> Self {
+        Self::from_connection(conn)
+    }
+}
+
+async fn connect<A>(addr: A, config: &Config)
+    -> Result<(Heartbeat<BaseIo>, IdentifyResponse), Error>
+where
+    A: Into<SocketAddr>,
+{
     let mut tcp = TcpStream::connect(addr.into()).await?;
     let mut nsq_codec = NsqCodec::new(true);
 
@@ -201,10 +198,10 @@ async fn connect<A: Into<SocketAddr>>(addr: A, config: &Config) -> Result<(Heart
     //     }
     // };
 
-    let boxed_stream: Box<dyn AsyncRW + Send + Unpin> = if identify.snappy {
+    let boxed_stream = if identify.snappy {
         let mut snappy_stream = upgrade_snappy(socket);
         if let NsqFramed::Response(RawResponse::Ok) = read_response(&mut snappy_stream, &mut nsq_codec).await? {
-            Box::new(snappy_stream)
+            BaseIo::Snappy(snappy_stream)
         } else {
             return Err(Error::from(std::io::Error::new(
                 std::io::ErrorKind::Other,
@@ -212,10 +209,9 @@ async fn connect<A: Into<SocketAddr>>(addr: A, config: &Config) -> Result<(Heart
             )));
         }
     } else if identify.deflate {
-        let (read_half, write_half) = tokio::io::split(socket);
-        let mut deflate_stream = upgrade_deflate(read_half, write_half, identify.deflate_level);
+        let mut deflate_stream = upgrade_deflate(socket, identify.deflate_level);
         if let NsqFramed::Response(RawResponse::Ok) = read_response(&mut deflate_stream, &mut nsq_codec).await? {
-            Box::new(deflate_stream)
+            BaseIo::Deflate(deflate_stream)
         } else {
             return Err(Error::from(std::io::Error::new(
                 std::io::ErrorKind::Other,
@@ -223,7 +219,7 @@ async fn connect<A: Into<SocketAddr>>(addr: A, config: &Config) -> Result<(Heart
             )));
         }
     } else {
-        Box::new(socket)
+        BaseIo::NoCompress(socket)
     };
     let mut framed = Framed::new(boxed_stream, nsq_codec);
 
@@ -236,52 +232,12 @@ async fn connect<A: Into<SocketAddr>>(addr: A, config: &Config) -> Result<(Heart
     Ok((Heartbeat::new(framed), identify))
 }
 
-#[cfg(feature = "tls-tokio")]
-async fn upgrade_tls(domain: &str, inner: TcpStream, tls_config: &TlsConfig, nsq_codec: &mut NsqCodec)
-    -> Result<TlsStream<TcpStream>, Error>
-{
-    // todo!()
-    // TODO from config
-    let root_certs = RootCertStore { roots: vec![] };
-    let client_config = ClientConfig::builder()
-        .with_safe_defaults()
-        .with_root_certificates(root_certs)
-        .with_no_client_auth();
-    let client_config = Arc::new(client_config);
-    let connector = TlsConnector::from(client_config);
-    // TODO FIXME data from peer may have already read in the buffer
-    let mut tls_socket = connector.connect(ServerName::try_from(tls_config.domain.as_str())?, inner).await?;
-    if let NsqFramed::Response(RawResponse::Ok) = read_response(&mut tls_socket, nsq_codec).await? {
-        // Ok(Box::new(tls_socket))
-        Ok(tls_socket)
-    } else {
-        Err(io::Error::from(io::ErrorKind::UnexpectedEof).into())
-    }
-}
 
-#[cfg(feature = "tls-native")]
-async fn upgrade_tls<T>(domain: &str, inner: T, tls_config: &TlsConfig, nsq_codec: &mut NsqCodec)
-    // -> Result<TlsStream, Error>
-    -> Result<Box<dyn AsyncRead + AsyncWrite + Unpin>, Error>
-    where T: AsyncRead + AsyncWrite + Unpin,
-{
-    let connector = native_tls::TlsConnector::new().unwrap();
-    let connector = TlsConnector::from(connector);
-    // TODO FIXME data from peer may have already read in the buffer
-    let tls_socket = connector.connect(domain, inner).await?;
-    if let NsqFramed::Response(RawResponse::ok) = read_response(&mut tls_socket, nsq_codec).await?{
-        Ok(Box::new(tls_socket))
-    } else {
-        Err(io::Error::from(io::ErrorKind::UnexpectedEof).into())
-    }
-}
-
-fn upgrade_deflate<R, W>(reader: R, writer: W, level: u32) -> DeflateStream<R, W>
+fn upgrade_deflate<T>(io: T, level: u32) -> DeflateStream<T>
 where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
+    T: AsyncRead + AsyncWrite + Unpin,
 {
-    DeflateStream::new(reader, writer, level)
+    DeflateStream::new(io, level)
 }
 
 fn upgrade_snappy<T>(inner: T) -> SnappyIO<T>

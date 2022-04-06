@@ -3,7 +3,9 @@ use serde::{Serialize, Serializer, ser::SerializeMap};
 use crate::command::Command;
 use crate::Error;
 
-#[derive(Debug, Serialize)]
+const DEFAULT_CLIENT_NAME: &str = "nsq_in_rust";
+
+#[derive(Debug, Clone, Serialize)]
 pub struct Config {
     pub client_id: String,
     pub hostname: String,
@@ -64,7 +66,7 @@ impl Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            client_id: "nsq_in_rust".into(),
+            client_id: DEFAULT_CLIENT_NAME.into(),
             hostname: ::hostname::get_hostname().unwrap_or_else(|| "unknown".to_owned()),
             user_agent: crate::USER_AGENT.into(),
             tls_v1: None,
@@ -116,7 +118,7 @@ fn serialize_compress<S: Serializer>(compress: &Compress, serializer: S) -> Resu
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Compress {
     Disabled,
     Snappy,
@@ -154,7 +156,7 @@ impl Default for Compress {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TlsConfig {
     pub domain: String,
 

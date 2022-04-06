@@ -3,6 +3,7 @@ use std::task::{Context, Poll};
 use futures::prelude::*;
 use futures::ready;
 use tokio_util::codec::Framed;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::codec::NsqCodec;
 use crate::error::Error;
@@ -15,11 +16,10 @@ use crate::{
 };
 use crate::command::Command;
 
-use super::connection::AsyncRW;
-type InnerFramed = Framed<Box<dyn AsyncRW + Send + Unpin + 'static>, NsqCodec>;
+type InnerFramed<T> = Framed<T, NsqCodec>;
 
-pub struct Heartbeat {
-    inner: InnerFramed,
+pub struct Heartbeat<T> {
+    inner: InnerFramed<T>,
     response_remaining: usize,
     status: Status,
 }
@@ -29,8 +29,11 @@ enum Status {
     Reading,
 }
 
-impl Heartbeat {
-    pub(crate) fn new(inner: InnerFramed) -> Self {
+impl<T> Heartbeat<T>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    pub(crate) fn new(inner: InnerFramed<T>) -> Self {
         Self { inner, response_remaining: 0, status: Status::Reading }
     }
 
@@ -51,7 +54,10 @@ impl Heartbeat {
     }
 }
 
-impl Stream for Heartbeat {
+impl<T> Stream for Heartbeat<T>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
     type Item = Result<Response, Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
@@ -113,7 +119,10 @@ impl Stream for Heartbeat {
     }
 }
 
-impl Sink<Command> for Heartbeat {
+impl<T> Sink<Command> for Heartbeat<T>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
     type Error = Error;
 
     fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {

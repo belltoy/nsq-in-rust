@@ -78,10 +78,10 @@ pub enum NsqFramed {
 
 #[derive(Debug)]
 pub struct NsqMsg {
-    timestamp: u64,
-    attempts: u16,
-    message_id: String,
-    body: Vec<u8>,
+    pub timestamp: u64,
+    pub attempts: u16,
+    pub message_id: String,
+    pub body: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -105,11 +105,9 @@ impl Encoder<Command> for NsqCodec {
                 Body::Binary(bin) => {
                     buf.reserve(bin.len() + 4);
                     buf.put_u32(bin.len() as u32);
-                    // buf.extend(bin);
                     buf.put(bin.as_slice());
                 }
                 Body::Messages(msgs) => {
-                    // let len = msgs.iter().map(|msg| msg.len()).fold(0, |acc, len| acc + len);
                     let body_len = msgs.iter().fold(8, |acc, msg| acc + msg.len() + MESSAGE_SIZE_LEN);
                     buf.reserve(body_len);
                     buf.put_u32(body_len as u32);
@@ -126,7 +124,6 @@ impl Encoder<Command> for NsqCodec {
                     let body = body.as_bytes();
                     buf.reserve(body.len() + 4);
                     buf.put_u32(body.len() as u32);
-                    // buf.extend(body);
                     buf.put(body);
                 }
             }

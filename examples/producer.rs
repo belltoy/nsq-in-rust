@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 
 use futures::prelude::*;
 use nsq_in_rust::{
+    Producer,
     config::{
         Config,
         Compress,
@@ -21,7 +22,7 @@ async fn main() -> Result<(), Error> {
         ..Default::default()
     };
     let conn = Connection::connect("127.0.0.1:4150".parse::<SocketAddr>().unwrap(), &config).await?;
-    let mut producer = conn.into_producer();
+    let mut producer: Producer = conn.into();
     let topic = "foo";
 
     info!("single publish");
