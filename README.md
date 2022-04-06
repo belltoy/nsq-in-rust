@@ -6,16 +6,20 @@ NSQ in Rust
 ## Features
 
 * Pure Rust
-* Async implementation based on [Futures 0.3](https://docs.rs/futures/0.3) and [Tokio 0.2](https://docs.rs/tokio/0.2)
-* High level
-    * [x] Producer(PUB)
-    * [ ] Comsumer(SUB)
-    * [ ] Discovery
-    * [ ] Backoff
-    * [x] TLS
+* Async implementation based on [Futures 0.3](https://docs.rs/futures/0.3) and [Tokio 1.x](https://docs.rs/tokio/1)
+* Low level
     * [x] Snappy
-    * [ ] Sampling
+    * [x] Deflate
+    * [ ] TLS
     * [x] AUTH
+* High level
+    * [ ] Producer(PUB)
+        - [ ] [Tower](https://crates.io/crates/tower) based `Publish` producer
+        - [ ] Tower based Discovery
+        - [ ] Connection pool and/or load balance
+    * [ ] Comsumer(SUB)
+    * [ ] Sampling
+    * [ ] Backoff
 
 ## Notes
 
